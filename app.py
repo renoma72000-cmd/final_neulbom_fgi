@@ -593,11 +593,22 @@ if st.session_state.page == "fgi":
         else:
             for m in msgs:
                 if m["role"] == "user":
-                    q_prefix = "🗣️ " if m.get("reaction_prompt") else ""
-                    st.markdown(
-                        f'<div style="display:flex;justify-content:flex-end;margin:4px 0">'
-                        f'<div class="q-bbl">{q_prefix}{m["content"]}</div></div>',
-                        unsafe_allow_html=True)
+                    if m.get("reaction_prompt"):
+                        # 반응 라운드는 '진행자가 새 질문을 던진 것'처럼 보이면
+                        # 어색하니까, 대화 흐름 안의 작은 구분선으로만 표시.
+                        # (모델에게 보내는 내부 지시문은 그대로 유지됨 — 화면 표시만 다름)
+                        st.markdown(
+                            '<div style="text-align:center;margin:14px 0;color:#9ca3af;'
+                            'font-size:11px;display:flex;align-items:center;gap:8px">'
+                            '<div style="flex:1;height:1px;background:#e5e7eb"></div>'
+                            '🗣️ 참여자 반응'
+                            '<div style="flex:1;height:1px;background:#e5e7eb"></div>'
+                            '</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(
+                            f'<div style="display:flex;justify-content:flex-end;margin:4px 0">'
+                            f'<div class="q-bbl">{m["content"]}</div></div>',
+                            unsafe_allow_html=True)
                 else:
                     p = PERSONA_BASE.get(m.get("persona",""))
                     if not p: continue
@@ -638,18 +649,21 @@ if st.session_state.page == "fgi":
                     st.session_state.target = t; st.rerun()
 
         # ── 참여자 반응 유도 버튼 ──
-        # 최소 1턴 이상 대화가 쌓였을 때만 노출. 대상은 항상 "전체"로 강제
-        # (반응은 셋이 다 있어야 의미가 있음). 순서를 매번 섞어서 항상 같은
-        # 사람이 마무리하는 것처럼 안 보이게 함.
-        if msgs:
-            if st.button("🗣️ 참여자 반응 유도", key="induce_reaction", use_container_width=True):
-                if sess_key not in st.session_state.start_times:
-                    st.session_state.start_times[sess_key] = time.time()
-                reaction_q = random.choice(REACTION_PROMPTS)
-                with st.spinner("서로 반응하는 중..."):
-                    run_round(sess_key, reaction_q, docs, mode, "전체",
-                              shuffle=True, reaction=True)
-                st.rerun()
+        # 항상 보이지만, 대화가 없으면 비활성화 + 안내 문구.
+        # 대상은 항상 "전체"로 강제(반응은 셋이 다 있어야 의미가 있음).
+        # 순서를 매번 섞어서 항상 같은 사람이 마무리하는 것처럼 안 보이게 함.
+        has_msgs = bool(msgs)
+        if st.button("🗣️ 참여자 반응 유도", key="induce_reaction",
+                     use_container_width=True, disabled=not has_msgs):
+            if sess_key not in st.session_state.start_times:
+                st.session_state.start_times[sess_key] = time.time()
+            reaction_q = random.choice(REACTION_PROMPTS)
+            with st.spinner("서로 반응하는 중..."):
+                run_round(sess_key, reaction_q, docs, mode, "전체",
+                          shuffle=True, reaction=True)
+            st.rerun()
+        if not has_msgs:
+            st.caption("💡 질문을 먼저 하나 던지면, 참여자들이 서로 반응하게 만들 수 있어요.")
 
         question = st.chat_input("질문을 입력하세요...")
         if question:
