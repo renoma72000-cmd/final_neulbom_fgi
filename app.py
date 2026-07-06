@@ -336,31 +336,31 @@ def search_docs(docs, query, n=3):
             results.append({"source": short, "text": "\n...\n".join(chunks[:2])})
     return results
 
-def build_messages(persona_key, history):
+def build_messages(persona_key, history, include_others):
     """세션 히스토리를 '이 페르소나'의 시점으로 재구성한다.
 
-    문제였던 것: 기존 코드는 세션에 쌓인 모든 메시지를 그냥 user/assistant로
-    그대로 넘겨서, 다른 참여자(예: 김민정)의 답변이 지금 호출 중인 페르소나
-    (예: 이준호) 입장에서는 "assistant"(=자기 자신의 과거 발언)로 보였다.
-    그래서 모델이 남의 말을 자기가 한 말처럼 착각하거나, 이름이 안 붙어 있어
-    누구 말에 반응해야 하는지 못 알아채는 문제가 있었다 (같은 사람이 두 번
-    말하는 것처럼 보이거나, 그냥 공감만 하고 꼬리질문이 없는 버그).
+    include_others=False (기본 질문 라운드): 이 페르소나 자신의 과거 발언과
+    진행자 질문만 보여준다. 다른 참여자의 답변은 아예 안 보이게 해서,
+    질문 하나에 3명이 완전히 독립적으로 답하도록 한다.
 
-    해결: 이 페르소나 자신의 과거 답변만 assistant로 남기고, 다른 참여자의
-    답변은 화자 이름을 붙여 user 메시지(참고 정보)로 변환한다. 그리고
-    Claude API가 요구하는 user/assistant 교대 규칙을 지키기 위해 연속된
-    같은 role은 하나로 합친다.
+    include_others=True ("반응 유도" 라운드에서만): 다른 참여자의 답변도
+    화자 이름을 붙여 user 메시지(참고 정보)로 포함시켜서, 서로의 말에
+    실제로 반응할 수 있게 한다.
+
+    (참고: 예전엔 다른 참여자 답변을 이름 표시 없이 그냥 assistant로 넘겨서
+    모델이 남의 말을 자기 말로 착각하는 버그가 있었음 — 지금은 이름을
+    붙이고, 애초에 기본 라운드에서는 아예 안 보여주는 걸로 정리함.)
     """
     raw = []
     for m in history[-16:]:
         if m["role"] == "user":
             raw.append(("user", m["content"]))
-        else:
-            if m.get("persona") == persona_key:
-                raw.append(("assistant", m["content"]))
-            else:
-                speaker = PERSONA_BASE.get(m.get("persona"), {}).get("name", "다른 참여자")
-                raw.append(("user", f"[{speaker}의 발언] {m['content']}"))
+        elif m.get("persona") == persona_key:
+            raw.append(("assistant", m["content"]))
+        elif include_others:
+            speaker = PERSONA_BASE.get(m.get("persona"), {}).get("name", "다른 참여자")
+            raw.append(("user", f"[{speaker}의 발언] {m['content']}"))
+        # include_others=False면 다른 참여자 발언은 그냥 건너뜀
 
     merged = []
     for role, content in raw:
@@ -375,7 +375,7 @@ def build_messages(persona_key, history):
     return merged
 
 
-def get_response(persona_key, question, history, docs, mode, target):
+def get_response(persona_key, question, history, docs, mode, target, reaction=False):
     p = PERSONA_BASE[persona_key]
     if target != "전체" and p["name"] != target:
         return None
@@ -390,6 +390,16 @@ def get_response(persona_key, question, history, docs, mode, target):
     policy_sec = f"\n\n[정책 초안]\n{POLICY_DRAFT}\n" if mode == "검증" else ""
     others = ", ".join(f"{v['name']}({k})" for k,v in PERSONA_BASE.items() if k != persona_key)
 
+    reaction_rule = (
+        f"""5. 대화 중 "[이름의 발언] ..." 형태로 표시된 내용은 다른 참여자({others})가 방금 한 말입니다.
+   해당 발언에 동의/반박하거나, 자신의 경험과 연결지어 자연스럽게 반응하세요.
+   가능하면 단순 공감으로 끝내지 말고, 상대방에게 되묻거나 자신의 입장에서 구체적으로 덧붙이세요.
+6. """
+        if reaction else
+        """5. 다른 참여자를 언급하거나 그들의 의견을 추측하지 말고, 오직 자신의 경험과 입장에서만 답하세요.
+6. """
+    )
+
     system = f"""당신은 늘봄학교 FGI에 참여하는 합성 사용자입니다.
 
 {profile}
@@ -402,19 +412,26 @@ def get_response(persona_key, question, history, docs, mode, target):
 2. 참고 데이터에 있는 내용만 구체적 수치로 언급하세요.
 3. 데이터 범위를 벗어난 내용이나 추측이 필요한 경우 "답변할 수 없습니다."라고만 하세요.
 4. 탐색 모드에서 정책 초안 내용을 언급하는 질문을 받으면 반드시 "그런 계획이 있는지 몰랐어요"라고만 답하세요.
-5. 대화 중 "[이름의 발언] ..." 형태로 표시된 내용은 다른 참여자({others})가 방금 한 말입니다.
-   해당 발언에 동의/반박하거나, 자신의 경험과 연결지어 자연스럽게 반응하세요.
-   가능하면 단순 공감으로 끝내지 말고, 상대방에게 되묻거나 자신의 입장에서 구체적으로 덧붙이세요.
-6. 250자 내외로 간결하게 존댓말로 답변하세요."""
+{reaction_rule}250자 내외로 간결하게 존댓말로 답변하세요."""
 
-    messages = build_messages(persona_key, history)
+    messages = build_messages(persona_key, history, include_others=reaction)
 
     try:
         api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.session_state.get("api_key", "")
         client = anthropic.Anthropic(api_key=api_key)
         resp = client.messages.create(model=MODEL, max_tokens=400, system=system, messages=messages)
         answer = resp.content[0].text.strip()
-        refused = ("답변할 수 없습니다" in answer) or ("그런 계획이 있는지 몰랐어요" in answer)
+        # 거부 판정: "답변할 수 없습니다" 또는 "몰랐어요" 캔드 문구가 답변 "전체"에
+        # 가까울 때만 거부로 본다. 정상 답변 안에 자연스럽게 그 표현이 섞여
+        # 있는 경우(예: "미리 알고 계셨어요?"라는 질문에 "몰랐어요"로 답하며
+        # 말을 이어가는 경우)까지 거부로 잘못 판정하지 않기 위함.
+        stripped = answer.strip().rstrip(".。!? ")
+        canned = "그런 계획이 있는지 몰랐어요"
+        refused = (
+            answer.strip() == "답변할 수 없습니다."
+            or answer.strip() == "답변할 수 없습니다"
+            or (stripped == canned and len(stripped) <= len(canned) + 3)
+        )
         return {"answer": answer, "sources": sources, "refused": refused}
     except Exception as e:
         return {"answer": f"오류: {e}", "sources": [], "refused": True}
@@ -438,7 +455,7 @@ def run_round(sess_key, question, docs, mode, target, shuffle=False, reaction=Fa
     if shuffle:
         random.shuffle(order)
     for pk in order:
-        result = get_response(pk, question, st.session_state.sessions[sess_key], docs, mode, target)
+        result = get_response(pk, question, st.session_state.sessions[sess_key], docs, mode, target, reaction=reaction)
         if result:
             st.session_state.sessions[sess_key].append({
                 "role": "assistant", "content": result["answer"],
