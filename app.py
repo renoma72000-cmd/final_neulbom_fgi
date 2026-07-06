@@ -96,34 +96,34 @@ div[data-testid="stButton"] button[kind="primary"]:hover{
 
 /* 설정 */
 .set-page{max-width:780px;margin:0 auto;padding:28px 20px}
-.set-h{font-size:18px;font-weight:600;color:#111;margin-bottom:6px;display:flex;align-items:center;gap:6px}
-.set-sub{font-size:15px;color:#9ca3af;margin-bottom:14px;line-height:1.5}
+.set-h{font-size:16px;font-weight:600;color:#111;margin-bottom:6px;display:flex;align-items:center;gap:6px}
+.set-sub{font-size:13px;color:#9ca3af;margin-bottom:14px;line-height:1.5}
 .ptab-grid{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:14px}
-.ptab{font-size:16px;padding:5px 13px;border-radius:6px;border:1px solid #e5e7eb;background:white;color:#6b7280}
+.ptab{font-size:14px;padding:5px 13px;border-radius:6px;border:1px solid #e5e7eb;background:white;color:#6b7280}
 .ptab.on{background:#3b82f6;color:white;border-color:#3b82f6}
 .pc-card{background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:14px;margin-bottom:10px}
 .pc-top{display:flex;align-items:center;gap:9px;margin-bottom:10px}
-.pc-av{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px}
+.pc-av{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px}
 .pc-nm{font-size:17px;font-weight:600;color:#111}
-.pc-mt{font-size:15px;color:#9ca3af}
-.pc-body{font-size:16px;color:#374151;line-height:1.75;margin-bottom:10px}
+.pc-mt{font-size:13px;color:#9ca3af}
+.pc-body{font-size:14px;color:#374151;line-height:1.75;margin-bottom:10px}
 .tag-row{display:flex;flex-wrap:wrap;gap:4px}
 .src-tag{font-size:14px;padding:3px 9px;border-radius:3px;
     background:#f3f4f6;border:1px solid #e5e7eb;color:#374151;
     display:inline-flex;align-items:center;gap:4px}
 .src-tag::before{content:"📎";font-size:11px}
 .policy-box{background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:14px;margin-bottom:10px}
-.pol-title{font-size:16px;font-weight:600;color:#15803d;margin-bottom:8px}
-.pol-body{font-size:15px;color:#374151;line-height:1.8}
+.pol-title{font-size:14px;font-weight:600;color:#15803d;margin-bottom:8px}
+.pol-body{font-size:13px;color:#374151;line-height:1.8}
 .pol-note{font-size:14px;color:#9ca3af;margin-top:8px;padding-top:8px;border-top:1px solid #d1fae5}
 .kb-card{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;margin-bottom:6px}
 .kbc-top{display:flex;align-items:flex-start;justify-content:space-between;gap:6px;margin-bottom:4px}
-.kbc-nm{font-size:15px;font-weight:600;color:#111}
+.kbc-nm{font-size:13px;font-weight:600;color:#111}
 .kbc-b{font-size:13px;padding:1px 5px;border-radius:3px;font-weight:600;flex-shrink:0}
 .pdf-b{background:#eff6ff;color:#1d4ed8}
 .xls-b{background:#f0fdf4;color:#15803d}
-.kbc-org{font-size:14px;color:#9ca3af;margin-bottom:3px}
-.kbc-desc{font-size:14px;color:#6b7280;line-height:1.5}
+.kbc-org{font-size:12px;color:#9ca3af;margin-bottom:3px}
+.kbc-desc{font-size:12px;color:#6b7280;line-height:1.5}
 .divider{height:1px;background:#e5e7eb;margin:18px 0}
 </style>
 """, unsafe_allow_html=True)
@@ -317,6 +317,41 @@ def load_docs():
         except: pass
     return docs
 
+def resolve_source_name(fname):
+    """실제 파일명 → DATA_INFO 표시 이름 매칭.
+
+    예전엔 '이름의 앞 두 단어 중 하나라도 파일명에 있으면 채택'이었는데,
+    거의 모든 문서명이 "늘봄학교"로 시작해서 무조건 첫 번째 항목으로
+    잘못 매칭됐다 (질적 사례연구든 가이드라인이든 다 "성과분석 연구"로
+    표시되는 버그).
+
+    지금은: 이름의 단어가 파일명과 "전부" 겹치는 항목을 최우선으로 찾고
+    (완전 일치), 그런 항목이 여럿이면 매칭 글자 수 + 확장자(pdf/xlsx)
+    일치 가산점이 가장 높은 걸 고른다. 완전 일치가 하나도 없으면
+    부분 일치 중 최고 점수로 대체한다. (부분 점수만으로는 "교원 인식
+    조사"처럼 세 단어가 다 맞는 문서가, 두 단어만 맞지만 우연히 글자
+    수가 비슷한 다른 문서한테 동점으로 밀리는 경우가 있어서 완전 일치를
+    먼저 본다.)
+    """
+    ext = Path(fname).suffix.lower().lstrip(".")
+    full_matches = []
+    partial_best_name, partial_best_score = None, 0
+    for d in DATA_INFO:
+        words = d["name"].split()
+        matched = [w for w in words if w in fname]
+        score = sum(len(w) for w in matched)
+        if d.get("type", "").lower() == ext:
+            score += 5
+        if words and len(matched) == len(words):
+            full_matches.append((score, d["name"]))
+        if score > partial_best_score:
+            partial_best_score = score
+            partial_best_name = d["name"]
+    if full_matches:
+        full_matches.sort(reverse=True)
+        return full_matches[0][1]
+    return partial_best_name or fname[:20]
+
 def search_docs(docs, query, n=3):
     kws = [w for w in query.split() if len(w) > 1]
     scored = [(sum(t.count(k) for k in kws), fn, t) for fn, t in docs.items()]
@@ -332,8 +367,7 @@ def search_docs(docs, query, n=3):
                 if chunk not in chunks: chunks.append(chunk)
                 idx = text.find(kw, idx+1)
         if chunks:
-            short = next((d["name"] for d in DATA_INFO if any(w in fname for w in d["name"].split()[:2])), fname[:20])
-            results.append({"source": short, "text": "\n...\n".join(chunks[:2])})
+            results.append({"source": resolve_source_name(fname), "text": "\n...\n".join(chunks[:2])})
     return results
 
 def build_messages(persona_key, history, include_others):
@@ -410,7 +444,11 @@ def get_response(persona_key, question, history, docs, mode, target, reaction=Fa
 응답 규칙:
 1. 위 프로필에 맞게 자연스럽게 대화하세요.
 2. 참고 데이터에 있는 내용만 구체적 수치로 언급하세요.
-3. 데이터 범위를 벗어난 내용이나 추측이 필요한 경우 "답변할 수 없습니다."라고만 하세요.
+3. 질문이 늘봄학교/돌봄 정책과 무관한 개인적인 내용(예: 식사, 취미, 가족, 연봉 등)이거나
+   참고 데이터로 뒷받침할 수 없는 내용이면, 다른 말 절대 덧붙이지 말고 정확히 이 한 문장만 출력하세요:
+   답변할 수 없습니다.
+   금지 사항: "그건 답변드리기 어렵네요", "오늘 주제에 집중하죠", "(웃음)" 같은 식으로
+   돌려서 거절하지 마세요. 반드시 "답변할 수 없습니다." 한 문장 그대로만 출력해야 합니다.
 4. 탐색 모드에서 정책 초안 내용을 언급하는 질문을 받으면 반드시 "그런 계획이 있는지 몰랐어요"라고만 답하세요.
 {reaction_rule}250자 내외로 간결하게 존댓말로 답변하세요."""
 
