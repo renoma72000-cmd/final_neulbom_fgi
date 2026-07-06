@@ -1,6 +1,7 @@
 import streamlit as st
 import anthropic
 import time
+import random
 from datetime import datetime
 from pathlib import Path
 from pypdf import PdfReader
@@ -335,6 +336,45 @@ def search_docs(docs, query, n=3):
             results.append({"source": short, "text": "\n...\n".join(chunks[:2])})
     return results
 
+def build_messages(persona_key, history):
+    """세션 히스토리를 '이 페르소나'의 시점으로 재구성한다.
+
+    문제였던 것: 기존 코드는 세션에 쌓인 모든 메시지를 그냥 user/assistant로
+    그대로 넘겨서, 다른 참여자(예: 김민정)의 답변이 지금 호출 중인 페르소나
+    (예: 이준호) 입장에서는 "assistant"(=자기 자신의 과거 발언)로 보였다.
+    그래서 모델이 남의 말을 자기가 한 말처럼 착각하거나, 이름이 안 붙어 있어
+    누구 말에 반응해야 하는지 못 알아채는 문제가 있었다 (같은 사람이 두 번
+    말하는 것처럼 보이거나, 그냥 공감만 하고 꼬리질문이 없는 버그).
+
+    해결: 이 페르소나 자신의 과거 답변만 assistant로 남기고, 다른 참여자의
+    답변은 화자 이름을 붙여 user 메시지(참고 정보)로 변환한다. 그리고
+    Claude API가 요구하는 user/assistant 교대 규칙을 지키기 위해 연속된
+    같은 role은 하나로 합친다.
+    """
+    raw = []
+    for m in history[-16:]:
+        if m["role"] == "user":
+            raw.append(("user", m["content"]))
+        else:
+            if m.get("persona") == persona_key:
+                raw.append(("assistant", m["content"]))
+            else:
+                speaker = PERSONA_BASE.get(m.get("persona"), {}).get("name", "다른 참여자")
+                raw.append(("user", f"[{speaker}의 발언] {m['content']}"))
+
+    merged = []
+    for role, content in raw:
+        if merged and merged[-1]["role"] == role:
+            merged[-1]["content"] += "\n" + content
+        else:
+            merged.append({"role": role, "content": content})
+
+    if not merged or merged[0]["role"] != "user":
+        merged.insert(0, {"role": "user", "content": "(대화 시작)"})
+
+    return merged
+
+
 def get_response(persona_key, question, history, docs, mode, target):
     p = PERSONA_BASE[persona_key]
     if target != "전체" and p["name"] != target:
@@ -362,11 +402,12 @@ def get_response(persona_key, question, history, docs, mode, target):
 2. 참고 데이터에 있는 내용만 구체적 수치로 언급하세요.
 3. 데이터 범위를 벗어난 내용이나 추측이 필요한 경우 "답변할 수 없습니다."라고만 하세요.
 4. 탐색 모드에서 정책 초안 내용을 언급하는 질문을 받으면 반드시 "그런 계획이 있는지 몰랐어요"라고만 답하세요.
-5. 다른 참여자({others})의 발언에 자연스럽게 반응할 수 있습니다.
+5. 대화 중 "[이름의 발언] ..." 형태로 표시된 내용은 다른 참여자({others})가 방금 한 말입니다.
+   해당 발언에 동의/반박하거나, 자신의 경험과 연결지어 자연스럽게 반응하세요.
+   가능하면 단순 공감으로 끝내지 말고, 상대방에게 되묻거나 자신의 입장에서 구체적으로 덧붙이세요.
 6. 250자 내외로 간결하게 존댓말로 답변하세요."""
 
-    messages = [{"role": m["role"], "content": m["content"]} for m in history[-8:]]
-    messages.append({"role": "user", "content": question})
+    messages = build_messages(persona_key, history)
 
     try:
         api_key = st.secrets.get("ANTHROPIC_API_KEY", "") or st.session_state.get("api_key", "")
@@ -378,6 +419,34 @@ def get_response(persona_key, question, history, docs, mode, target):
     except Exception as e:
         return {"answer": f"오류: {e}", "sources": [], "refused": True}
 
+REACTION_PROMPTS = [
+    "방금 다른 참여자들이 하신 이야기를 들으셨죠? 그 의견들에 대해 어떻게 생각하시는지 자유롭게 말씀해주세요.",
+    "지금까지 나온 이야기 중에 동의하기 어려운 부분이나, 반대로 완전히 공감되는 부분이 있으면 말씀해주세요.",
+    "다른 분들 의견 듣고 나서 생각이 좀 바뀌었거나, 덧붙이고 싶은 이야기가 있나요?",
+]
+
+def run_round(sess_key, question, docs, mode, target, shuffle=False, reaction=False):
+    """질문 하나에 대해 참여자(들)가 순서대로 응답하는 한 라운드를 실행한다.
+    - shuffle=True면 매번 응답 순서를 무작위로 섞어서, 항상 같은 사람이
+      마지막에 '정리하는' 것처럼 보이는 걸 방지한다 (반응 유도 라운드용).
+    - reaction=True로 저장된 메시지는 화면에서 "🗣️ 반응" 배지로 구분 표시된다.
+    """
+    st.session_state.sessions[sess_key].append({
+        "role": "user", "content": question, "reaction_prompt": reaction
+    })
+    order = list(PERSONA_BASE.keys())
+    if shuffle:
+        random.shuffle(order)
+    for pk in order:
+        result = get_response(pk, question, st.session_state.sessions[sess_key], docs, mode, target)
+        if result:
+            st.session_state.sessions[sess_key].append({
+                "role": "assistant", "content": result["answer"],
+                "persona": pk, "sources": result["sources"],
+                "refused": result["refused"], "reaction": reaction
+            })
+            time.sleep(0.1)
+
 def make_log(pid, mode):
     msgs = st.session_state.sessions.get(f"{pid}_{mode}", [])
     lines = ["="*60, "늘봄학교 FGI 대화록",
@@ -385,11 +454,13 @@ def make_log(pid, mode):
              f"저장: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "="*60, ""]
     for m in msgs:
         if m["role"] == "user":
-            lines.append(f"[진행자]\n{m['content']}\n")
+            tag = " (반응 유도)" if m.get("reaction_prompt") else ""
+            lines.append(f"[진행자]{tag}\n{m['content']}\n")
         else:
             p = PERSONA_BASE.get(m.get("persona",""))
             nm = f"{p['emoji']} {p['name']}({m['persona']})" if p else "응답자"
-            lines.append(f"[{nm}]")
+            tag = " [반응]" if m.get("reaction") else ""
+            lines.append(f"[{nm}]{tag}")
             lines.append(m["content"])
             if m.get("sources"): lines.append(f"출처: {', '.join(m['sources'])}")
             lines.append("")
@@ -522,14 +593,19 @@ if st.session_state.page == "fgi":
         else:
             for m in msgs:
                 if m["role"] == "user":
+                    q_prefix = "🗣️ " if m.get("reaction_prompt") else ""
                     st.markdown(
                         f'<div style="display:flex;justify-content:flex-end;margin:4px 0">'
-                        f'<div class="q-bbl">{m["content"]}</div></div>',
+                        f'<div class="q-bbl">{q_prefix}{m["content"]}</div></div>',
                         unsafe_allow_html=True)
                 else:
                     p = PERSONA_BASE.get(m.get("persona",""))
                     if not p: continue
                     av = "av-a" if m["persona"]=="학부모" else ("av-b" if m["persona"]=="교사" else "av-c")
+                    react_badge = (
+                        '<span style="font-size:10px;color:#7c3aed;background:#f3e8ff;'
+                        'border-radius:8px;padding:1px 6px;margin-left:6px">🗣️ 반응</span>'
+                    ) if m.get("reaction") else ""
                     if m.get("refused"):
                         body = ('<div class="a-refused">' + m["content"] + '</div>'
                                 '<div class="refused-tag">⚠ 데이터 범위 외 — 답변 불가</div>')
@@ -545,7 +621,7 @@ if st.session_state.page == "fgi":
                     <div class="a-blk" style="margin:6px 0">
                       <div class="a-hd">
                         <div class="av {av}" style="width:22px;height:22px;font-size:11px">{p['emoji']}</div>
-                        <div class="a-nm">{p['name']} · {m['persona']}</div>
+                        <div class="a-nm">{p['name']} · {m['persona']}{react_badge}</div>
                       </div>
                       {body}
                     </div>""", unsafe_allow_html=True)
@@ -561,23 +637,26 @@ if st.session_state.page == "fgi":
                 if st.button(t, key=f"tgt_{t}", use_container_width=True, type=btn_type):
                     st.session_state.target = t; st.rerun()
 
+        # ── 참여자 반응 유도 버튼 ──
+        # 최소 1턴 이상 대화가 쌓였을 때만 노출. 대상은 항상 "전체"로 강제
+        # (반응은 셋이 다 있어야 의미가 있음). 순서를 매번 섞어서 항상 같은
+        # 사람이 마무리하는 것처럼 안 보이게 함.
+        if msgs:
+            if st.button("🗣️ 참여자 반응 유도", key="induce_reaction", use_container_width=True):
+                if sess_key not in st.session_state.start_times:
+                    st.session_state.start_times[sess_key] = time.time()
+                reaction_q = random.choice(REACTION_PROMPTS)
+                with st.spinner("서로 반응하는 중..."):
+                    run_round(sess_key, reaction_q, docs, mode, "전체",
+                              shuffle=True, reaction=True)
+                st.rerun()
+
         question = st.chat_input("질문을 입력하세요...")
         if question:
             if sess_key not in st.session_state.start_times:
                 st.session_state.start_times[sess_key] = time.time()
-            st.session_state.sessions[sess_key].append({"role":"user","content":question})
             with st.spinner("응답 생성 중..."):
-                for pk in PERSONA_BASE:
-                    result = get_response(pk, question,
-                                         st.session_state.sessions[sess_key],
-                                         docs, mode, st.session_state.target)
-                    if result:
-                        st.session_state.sessions[sess_key].append({
-                            "role":"assistant","content":result["answer"],
-                            "persona":pk,"sources":result["sources"],
-                            "refused":result["refused"]
-                        })
-                        time.sleep(0.1)
+                run_round(sess_key, question, docs, mode, st.session_state.target)
             st.rerun()
 
 # ══════════════════════════════════════
