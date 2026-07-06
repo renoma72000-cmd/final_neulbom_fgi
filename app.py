@@ -414,7 +414,7 @@ def get_response(persona_key, question, history, docs, mode, target):
         client = anthropic.Anthropic(api_key=api_key)
         resp = client.messages.create(model=MODEL, max_tokens=400, system=system, messages=messages)
         answer = resp.content[0].text.strip()
-        refused = "답변할 수 없습니다" in answer or "몰랐어요" in answer
+        refused = ("답변할 수 없습니다" in answer) or ("그런 계획이 있는지 몰랐어요" in answer)
         return {"answer": answer, "sources": sources, "refused": refused}
     except Exception as e:
         return {"answer": f"오류: {e}", "sources": [], "refused": True}
