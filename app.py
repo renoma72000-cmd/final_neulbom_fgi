@@ -2,6 +2,7 @@ import streamlit as st
 import anthropic
 import time
 import random
+import re
 from datetime import datetime
 from pathlib import Path
 from pypdf import PdfReader
@@ -288,7 +289,7 @@ DATA_INFO = [
     {"no": 3, "name": "늘봄학교 질적 사례연구", "org": "한국교육개발원 · 2024", "type": "PDF",
      "desc": "전국 8개 우수 운영교 학부모·교사·학생·담당자 심층 면담 전사. 저녁늘봄 실제 운영 사례, 공간·인력 문제 현장 발화 포함."},
     {"no": 4, "name": "교원 인식 조사", "org": "충남교총 교육연구소 · 2024", "type": "PDF",
-     "desc": "충남 초등교원 304명 설문. 교육부 정책 반대 86.8%, 교사 직접 담당 73.9%, 교사 업무 분리 요구 74.3% 수치 근거."},
+     "desc": "충남 초등교원(교사·선생님) 304명 설문. 교육부 정책 반대 86.8%, 교사 직접 담당 73.9%, 교사 업무 분리 요구 74.3% 수치 근거."},
     {"no": 5, "name": "사회조사 결과 보도자료", "org": "통계청 · 2024. 11.", "type": "PDF",
      "desc": "전국 19,000 가구 36,000명 대상. 맞벌이 가구 자녀 돌봄 현황, 교육비 부담 등 학부모 인구통계 수치 근거."},
     {"no": 6, "name": "사회조사 통계표", "org": "통계청 · 2024. 11.", "type": "XLSX",
@@ -338,43 +339,76 @@ def resolve_source_info(fname):
         return full_matches[0][1]
     return partial_best
 
-def _filter_generic_keywords(docs, kws):
-    """'늘봄학교', '돌봄', '학교'처럼 사실상 모든 문서에 다 나오는 단어는
-    검색 신호로 쓸모가 없다 (어떤 질문을 해도 걸리기 때문). 전체 문서 중
-    이 단어가 등장하는 문서 수를 세서, 너무 흔하면 후보에서 제외한다."""
-    total = len(docs)
-    if total <= 1:
-        return kws
-    specific = [k for k in kws if sum(1 for t in docs.values() if k in t) < total]
-    return specific or kws  # 다 걸러지면(=아무 단서도 없으면) 원본으로 대체
+# 한국어는 조사(은/는/이/가/을/를/이랑 등)가 단어에 그대로 붙어서, 원문 PDF의
+# "참여율" 이라는 단어가 질문에서는 "참여율이랑"으로 나타나는 식으로 단순 부분
+# 문자열 검색이 잘 안 맞는 경우가 많다. 흔한 조사를 뒤에서부터 잘라내서
+# 매칭률을 높인다. 완벽한 형태소 분석기는 아니고 실용적인 근사치.
+_PARTICLES = sorted([
+    "이라서", "이라면", "이라고", "이랑", "라고", "라도", "한테", "에게서", "에게",
+    "에서", "까지", "부터", "이나마", "이나", "으로는", "으로", "로서", "로써",
+    "로는", "로", "와", "과", "은", "는", "이", "가", "을", "를", "도", "만", "의",
+    "들",
+], key=len, reverse=True)
+
+def _strip_particle(word):
+    for p in _PARTICLES:
+        if word.endswith(p) and len(word) > len(p) + 1:
+            return word[: -len(p)]
+    return word
+
+def _keywords(query):
+    raw = re.findall(r"[가-힣A-Za-z0-9]+", query)
+    kws, seen = [], set()
+    for w in raw:
+        if len(w) <= 1:
+            continue
+        w2 = _strip_particle(w)
+        if len(w2) <= 1 or w2 in seen:
+            continue
+        seen.add(w2)
+        kws.append(w2)
+    return kws
 
 def search_docs(docs, query, n=2):
-    kws = _filter_generic_keywords(docs, [w for w in query.split() if len(w) > 1])
+    """자료 선택은 각 문서의 큐레이션된 설명(desc)을 기준으로 한다.
+    예전엔 PDF 원문 전체(특히 인터뷰 전사 2개, 수십만 자)를 대상으로 검색해서,
+    전사본에 우연히 섞인 일상 단어 때문에 거의 모든 질문이 그 2개 문서로만
+    쏠렸다. desc는 각 문서를 구분하는 핵심 키워드 위주로 짧게 정리돼 있어서
+    "임금", "참여율", "저녁", "지역별" 같은 질문 키워드가 정확히 그 문서에만
+    걸리도록 설계돼 있다. 실제 인용 문장은 원문에서 찾되, 못 찾으면 desc로
+    대체한다.
+    """
+    kws = _keywords(query)
+    if not kws:
+        return []
+
     scored = []
-    for fn, t in docs.items():
-        hits = {k: t.count(k) for k in kws if k in t}
-        # 최소 조건: 서로 다른 키워드가 2개 이상 맞거나, 한 키워드가 여러 번(3+) 반복
-        # 등장해야 함. 그냥 우연히 한 단어가 인터뷰 전사에 한 번 스쳐 지나간 것
-        # 정도로는 "관련 자료"로 인정하지 않는다.
-        if len(hits) < 2 and sum(hits.values()) < 3:
-            continue
-        raw = sum(hits.values())
-        density = raw / max(len(t), 1)  # 문서 길이로 정규화(큰 문서가 무조건 유리해지는 것 방지)
-        scored.append((density, fn, t))
-    scored.sort(reverse=True)
+    for d in DATA_INFO:
+        corpus = d["name"] + " " + d.get("desc", "")
+        score = sum(1 for k in kws if k in corpus)
+        if score > 0:
+            scored.append((score, d))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    fname_by_no = {}
+    for fname in docs:
+        info = resolve_source_info(fname)
+        if info:
+            fname_by_no[info["no"]] = fname
+
     results = []
-    for _, fname, text in scored[:n]:
+    for _, d in scored[:n]:
+        text = docs.get(fname_by_no.get(d["no"], ""), "")
         chunks = []
         for kw in kws:
-            idx = text.find(kw)
+            idx = text.find(kw) if text else -1
             while idx != -1 and len(chunks) < 2:
-                chunk = text[max(0,idx-200):idx+400].strip()
-                if chunk not in chunks: chunks.append(chunk)
+                chunk = text[max(0, idx-200):idx+400].strip()
+                if chunk not in chunks:
+                    chunks.append(chunk)
                 idx = text.find(kw, idx+1)
-        if chunks:
-            d = resolve_source_info(fname)
-            label = f"[{d['no']}] {d['name']}" if d else fname[:20]
-            results.append({"source": label, "text": "\n...\n".join(chunks[:2])})
+        chunk_text = "\n...\n".join(chunks) if chunks else d.get("desc", "")
+        results.append({"source": f"[{d['no']}] {d['name']}", "text": chunk_text})
     return results
 
 def build_messages(persona_key, history, include_others):
@@ -440,34 +474,53 @@ def get_response(persona_key, question, history, docs, mode, target, reaction=Fa
 경험과 입장에서만 답하세요."""
     )
 
+    mode_note = (
+        "지금은 [탐색] 단계입니다. 정책 초안은 아직 공개되지 않았으며, 당신은 그 내용을 전혀 모릅니다."
+        if mode == "탐색" else
+        "지금은 [검증] 단계입니다. 아래 정책 초안 내용을 이미 알고 있는 상태에서 답변하세요. "
+        "\"그런 계획이 있는지 몰랐어요\"라는 말은 이 단계에서는 틀린 말이니 절대 쓰지 마세요."
+    )
+
+    # 탐색 단계에서만 이 규칙 텍스트 자체를 포함시킨다. 예전엔 "탐색 모드이고"라는
+    # 조건절만 붙여서 검증 모드에서도 이 규칙 문구가 계속 보였는데, 모델이 조건절보다
+    # "정책을 아느냐 묻는 질문 형태" 자체에 반사적으로 반응해서 검증 모드에서도
+    # "몰랐어요"를 잘못 내놓는 버그가 있었다. 아예 검증 모드에선 이 규칙 텍스트를
+    # 통째로 빼버리는 게 훨씬 확실하다.
+    policy_ignorance_rule = ("""[정책 무지 규칙 — 탐색 단계 전용] 질문이 정책 초안의 구체적 내용
+(시행 여부, 시간, 요일, 인원 기준 등)을 언급하거나 묻는 경우
+→ 다른 말 없이 정확히 이 문장만 출력: 그런 계획이 있는지 몰랐어요.
+   정책의 구체적 내용을 추측하거나 언급하면 절대 안 됩니다("만약 그렇다면 저는..." 같은
+   가정법으로 정책을 논평하는 것도 금지). 이 규칙은 참여자 전원에게 동일하게 적용되며
+   다른 모든 규칙보다 우선합니다.
+
+""" if mode == "탐색" else "")
+
     system = f"""당신은 늘봄학교 FGI에 참여하는 합성 사용자입니다.
 
 {profile}
+
+{mode_note}
 {policy_sec}
 참고 데이터:
 {ctx_text}
 
-아래 순서대로 딱 하나만 선택해서 답하세요. 절대 두 가지를 섞지 마세요
-(예: 정상적인 답변을 다 해놓고 마지막에 "답변할 수 없습니다."를 덧붙이는 것 금지).
+아래 중 해당하는 경우를 판단해서 딱 하나만 선택해 답하세요. 절대 두 가지를 섞지 마세요
+(예: 정상 답변을 다 해놓고 마지막에 "답변할 수 없습니다."를 덧붙이는 것 금지).
 
-[1순위] 탐색 모드이고, 질문이 정책 초안의 구체적 내용(시행 여부, 시간, 요일, 인원
-기준 등)을 언급하거나 묻는 경우
-→ 다른 말 없이 정확히 이 문장만 출력: 그런 계획이 있는지 몰랐어요.
-   이 경우 정책의 구체적 내용을 추측하거나 언급하면 절대 안 됩니다("만약 그렇다면
-   저는..." 같은 가정법으로 정책을 논평하는 것도 금지). 이 규칙은 참여자 전원에게
-   동일하게 적용되며 다른 모든 규칙보다 우선합니다.
-
-[2순위] 질문이 늘봄학교 운영·정책·돌봄 경험과 무관한 개인적인 내용(식사, 취미, 사생활,
-연예인, 연봉, 날씨 등)이거나, 참고 데이터가 실제로는 이 질문과 무관한 경우
+{policy_ignorance_rule}질문이 늘봄학교 운영·정책·돌봄 경험과 무관한 개인적인 내용(식사, 취미,
+사생활, 연예인, 연봉, 날씨 등)이거나, 참고 데이터가 실제로는 이 질문과 무관한 경우
 → 다른 말 없이 정확히 이 문장만 출력: 답변할 수 없습니다.
-   참고 데이터에 우연히 비슷한 단어가 섞여 있어도, 실제 내용이 질문에 답이 되지
-   않으면 데이터가 없는 것으로 간주하세요. "그건 답변드리기 어렵네요", "오늘 주제에
-   집중하죠" 같이 돌려 말하는 것도 금지 — 반드시 "답변할 수 없습니다." 그대로만
-   출력하세요.
+참고 데이터에 우연히 비슷한 단어가 섞여 있어도, 실제 내용이 질문에 답이 되지 않으면 데이터가
+없는 것으로 간주하세요. "그건 답변드리기 어렵네요" 식으로 돌려 말하는 것도 금지 — 반드시
+"답변할 수 없습니다." 그대로만 출력하세요.
 
-[3순위] 위 두 경우에 해당하지 않으면, 프로필과 참고 데이터를 바탕으로 정상적으로
-답변하세요. 이때는 "답변할 수 없습니다"나 "그런 계획이 있는지 몰랐어요" 같은 문구를
-절대 포함시키지 마세요.
+위 두 경우에 해당하지 않으면, 프로필과 참고 데이터를 바탕으로 정상적으로 답변하세요. 이때는
+"답변할 수 없습니다"나 "그런 계획이 있는지 몰랐어요" 문구를 절대 포함시키지 마세요.
+
+주의: 질문이 다른 역할의 전문 영역에 관한 것일 뿐(예: 학부모인 당신에게 돌봄전담사의 정확한
+임금 액수를 묻는 경우), 완전히 무관한 질문은 아닐 수 있습니다. 이런 경우 "답변할 수 없습니다"로
+거부하지 말고, "그건 제가 정확히는 모르겠고, ~님이 더 잘 아실 것 같아요" 같은 식으로 자신의
+입장에서 솔직하고 자연스럽게 답하세요. 이건 정상 답변입니다.
 
 공통 규칙:
 - 위 프로필에 맞게 자연스러운 존댓말로, 250자 내외로 간결하게 답하세요.
