@@ -281,19 +281,19 @@ PERSONA_STORIES = {
 }
 
 DATA_INFO = [
-    {"name": "늘봄학교 성과분석 연구", "org": "한국교육개발원 · 2024", "type": "PDF",
+    {"no": 1, "name": "늘봄학교 성과분석 연구", "org": "한국교육개발원 · 2024", "type": "PDF",
      "desc": "학부모·교사·돌봄 전담사 대상 전국 8개교 면담 전사 포함. 참여율 80%, 학부모 만족도 4.3점(5점), 재참여 의사 85.6% 수치 근거."},
-    {"name": "늘봄학교 고용영향 분석", "org": "한국노동연구원 · 2025", "type": "PDF",
+    {"no": 2, "name": "늘봄학교 고용영향 분석", "org": "한국노동연구원 · 2025", "type": "PDF",
      "desc": "돌봄 전담사 8인·늘봄실무사 7인 FGI 전사 포함. 전담사 임금 월 210만원대, 임금 만족도 14%, 초과근무 무급 실태 수치 근거."},
-    {"name": "늘봄학교 질적 사례연구", "org": "한국교육개발원 · 2024", "type": "PDF",
+    {"no": 3, "name": "늘봄학교 질적 사례연구", "org": "한국교육개발원 · 2024", "type": "PDF",
      "desc": "전국 8개 우수 운영교 학부모·교사·학생·담당자 심층 면담 전사. 저녁늘봄 실제 운영 사례, 공간·인력 문제 현장 발화 포함."},
-    {"name": "교원 인식 조사", "org": "충남교총 교육연구소 · 2024", "type": "PDF",
+    {"no": 4, "name": "교원 인식 조사", "org": "충남교총 교육연구소 · 2024", "type": "PDF",
      "desc": "충남 초등교원 304명 설문. 교육부 정책 반대 86.8%, 교사 직접 담당 73.9%, 교사 업무 분리 요구 74.3% 수치 근거."},
-    {"name": "사회조사 결과 보도자료", "org": "통계청 · 2024. 11.", "type": "PDF",
+    {"no": 5, "name": "사회조사 결과 보도자료", "org": "통계청 · 2024. 11.", "type": "PDF",
      "desc": "전국 19,000 가구 36,000명 대상. 맞벌이 가구 자녀 돌봄 현황, 교육비 부담 등 학부모 인구통계 수치 근거."},
-    {"name": "사회조사 통계표", "org": "통계청 · 2024. 11.", "type": "XLSX",
+    {"no": 6, "name": "사회조사 통계표", "org": "통계청 · 2024. 11.", "type": "XLSX",
      "desc": "연령·성별·지역별 자녀 돌봄 이용 현황 원시 통계. 학부모 프로필 인구통계 수치 직접 근거."},
-    {"name": "늘봄학교 운영 가이드라인", "org": "교육부 · 2024", "type": "PDF",
+    {"no": 7, "name": "늘봄학교 운영 가이드라인", "org": "교육부 · 2024", "type": "PDF",
      "desc": "저녁늘봄 운영 시간·학급 편성 기준(20명 이내)·귀가 안전관리 절차·인력 운영 기준 등 정책 맥락 근거."},
 ]
 
@@ -317,25 +317,11 @@ def load_docs():
         except: pass
     return docs
 
-def resolve_source_name(fname):
-    """실제 파일명 → DATA_INFO 표시 이름 매칭.
-
-    예전엔 '이름의 앞 두 단어 중 하나라도 파일명에 있으면 채택'이었는데,
-    거의 모든 문서명이 "늘봄학교"로 시작해서 무조건 첫 번째 항목으로
-    잘못 매칭됐다 (질적 사례연구든 가이드라인이든 다 "성과분석 연구"로
-    표시되는 버그).
-
-    지금은: 이름의 단어가 파일명과 "전부" 겹치는 항목을 최우선으로 찾고
-    (완전 일치), 그런 항목이 여럿이면 매칭 글자 수 + 확장자(pdf/xlsx)
-    일치 가산점이 가장 높은 걸 고른다. 완전 일치가 하나도 없으면
-    부분 일치 중 최고 점수로 대체한다. (부분 점수만으로는 "교원 인식
-    조사"처럼 세 단어가 다 맞는 문서가, 두 단어만 맞지만 우연히 글자
-    수가 비슷한 다른 문서한테 동점으로 밀리는 경우가 있어서 완전 일치를
-    먼저 본다.)
-    """
+def resolve_source_info(fname):
+    """실제 파일명 → DATA_INFO 항목(번호+이름) 매칭. (매칭 로직 설명은 위 함수 히스토리 참고)"""
     ext = Path(fname).suffix.lower().lstrip(".")
     full_matches = []
-    partial_best_name, partial_best_score = None, 0
+    partial_best, partial_best_score = None, 0
     for d in DATA_INFO:
         words = d["name"].split()
         matched = [w for w in words if w in fname]
@@ -343,19 +329,38 @@ def resolve_source_name(fname):
         if d.get("type", "").lower() == ext:
             score += 5
         if words and len(matched) == len(words):
-            full_matches.append((score, d["name"]))
+            full_matches.append((score, d))
         if score > partial_best_score:
             partial_best_score = score
-            partial_best_name = d["name"]
+            partial_best = d
     if full_matches:
-        full_matches.sort(reverse=True)
+        full_matches.sort(key=lambda x: x[0], reverse=True)
         return full_matches[0][1]
-    return partial_best_name or fname[:20]
+    return partial_best
 
-def search_docs(docs, query, n=3):
-    kws = [w for w in query.split() if len(w) > 1]
-    scored = [(sum(t.count(k) for k in kws), fn, t) for fn, t in docs.items()]
-    scored = [(s,fn,t) for s,fn,t in scored if s > 0]
+def _filter_generic_keywords(docs, kws):
+    """'늘봄학교', '돌봄', '학교'처럼 사실상 모든 문서에 다 나오는 단어는
+    검색 신호로 쓸모가 없다 (어떤 질문을 해도 걸리기 때문). 전체 문서 중
+    이 단어가 등장하는 문서 수를 세서, 너무 흔하면 후보에서 제외한다."""
+    total = len(docs)
+    if total <= 1:
+        return kws
+    specific = [k for k in kws if sum(1 for t in docs.values() if k in t) < total]
+    return specific or kws  # 다 걸러지면(=아무 단서도 없으면) 원본으로 대체
+
+def search_docs(docs, query, n=2):
+    kws = _filter_generic_keywords(docs, [w for w in query.split() if len(w) > 1])
+    scored = []
+    for fn, t in docs.items():
+        hits = {k: t.count(k) for k in kws if k in t}
+        # 최소 조건: 서로 다른 키워드가 2개 이상 맞거나, 한 키워드가 여러 번(3+) 반복
+        # 등장해야 함. 그냥 우연히 한 단어가 인터뷰 전사에 한 번 스쳐 지나간 것
+        # 정도로는 "관련 자료"로 인정하지 않는다.
+        if len(hits) < 2 and sum(hits.values()) < 3:
+            continue
+        raw = sum(hits.values())
+        density = raw / max(len(t), 1)  # 문서 길이로 정규화(큰 문서가 무조건 유리해지는 것 방지)
+        scored.append((density, fn, t))
     scored.sort(reverse=True)
     results = []
     for _, fname, text in scored[:n]:
@@ -367,7 +372,9 @@ def search_docs(docs, query, n=3):
                 if chunk not in chunks: chunks.append(chunk)
                 idx = text.find(kw, idx+1)
         if chunks:
-            results.append({"source": resolve_source_name(fname), "text": "\n...\n".join(chunks[:2])})
+            d = resolve_source_info(fname)
+            label = f"[{d['no']}] {d['name']}" if d else fname[:20]
+            results.append({"source": label, "text": "\n...\n".join(chunks[:2])})
     return results
 
 def build_messages(persona_key, history, include_others):
@@ -425,13 +432,12 @@ def get_response(persona_key, question, history, docs, mode, target, reaction=Fa
     others = ", ".join(f"{v['name']}({k})" for k,v in PERSONA_BASE.items() if k != persona_key)
 
     reaction_rule = (
-        f"""5. 대화 중 "[이름의 발언] ..." 형태로 표시된 내용은 다른 참여자({others})가 방금 한 말입니다.
-   해당 발언에 동의/반박하거나, 자신의 경험과 연결지어 자연스럽게 반응하세요.
-   가능하면 단순 공감으로 끝내지 말고, 상대방에게 되묻거나 자신의 입장에서 구체적으로 덧붙이세요.
-6. """
+        f"""다른 참여자({others})의 발언이 "[이름의 발언] ..." 형태로 보이면, 해당 발언에
+동의/반박하거나 자신의 경험과 연결지어 반응하세요. 단순 공감으로 끝내지 말고
+되묻거나 구체적으로 덧붙이세요."""
         if reaction else
-        """5. 다른 참여자를 언급하거나 그들의 의견을 추측하지 말고, 오직 자신의 경험과 입장에서만 답하세요.
-6. """
+        """다른 참여자를 언급하거나 그들의 의견을 추측하지 마세요. 오직 자신의
+경험과 입장에서만 답하세요."""
     )
 
     system = f"""당신은 늘봄학교 FGI에 참여하는 합성 사용자입니다.
@@ -441,16 +447,32 @@ def get_response(persona_key, question, history, docs, mode, target, reaction=Fa
 참고 데이터:
 {ctx_text}
 
-응답 규칙:
-1. 위 프로필에 맞게 자연스럽게 대화하세요.
-2. 참고 데이터에 있는 내용만 구체적 수치로 언급하세요.
-3. 질문이 늘봄학교/돌봄 정책과 무관한 개인적인 내용(예: 식사, 취미, 가족, 연봉 등)이거나
-   참고 데이터로 뒷받침할 수 없는 내용이면, 다른 말 절대 덧붙이지 말고 정확히 이 한 문장만 출력하세요:
-   답변할 수 없습니다.
-   금지 사항: "그건 답변드리기 어렵네요", "오늘 주제에 집중하죠", "(웃음)" 같은 식으로
-   돌려서 거절하지 마세요. 반드시 "답변할 수 없습니다." 한 문장 그대로만 출력해야 합니다.
-4. 탐색 모드에서 정책 초안 내용을 언급하는 질문을 받으면 반드시 "그런 계획이 있는지 몰랐어요"라고만 답하세요.
-{reaction_rule}250자 내외로 간결하게 존댓말로 답변하세요."""
+아래 순서대로 딱 하나만 선택해서 답하세요. 절대 두 가지를 섞지 마세요
+(예: 정상적인 답변을 다 해놓고 마지막에 "답변할 수 없습니다."를 덧붙이는 것 금지).
+
+[1순위] 탐색 모드이고, 질문이 정책 초안의 구체적 내용(시행 여부, 시간, 요일, 인원
+기준 등)을 언급하거나 묻는 경우
+→ 다른 말 없이 정확히 이 문장만 출력: 그런 계획이 있는지 몰랐어요.
+   이 경우 정책의 구체적 내용을 추측하거나 언급하면 절대 안 됩니다("만약 그렇다면
+   저는..." 같은 가정법으로 정책을 논평하는 것도 금지). 이 규칙은 참여자 전원에게
+   동일하게 적용되며 다른 모든 규칙보다 우선합니다.
+
+[2순위] 질문이 늘봄학교 운영·정책·돌봄 경험과 무관한 개인적인 내용(식사, 취미, 사생활,
+연예인, 연봉, 날씨 등)이거나, 참고 데이터가 실제로는 이 질문과 무관한 경우
+→ 다른 말 없이 정확히 이 문장만 출력: 답변할 수 없습니다.
+   참고 데이터에 우연히 비슷한 단어가 섞여 있어도, 실제 내용이 질문에 답이 되지
+   않으면 데이터가 없는 것으로 간주하세요. "그건 답변드리기 어렵네요", "오늘 주제에
+   집중하죠" 같이 돌려 말하는 것도 금지 — 반드시 "답변할 수 없습니다." 그대로만
+   출력하세요.
+
+[3순위] 위 두 경우에 해당하지 않으면, 프로필과 참고 데이터를 바탕으로 정상적으로
+답변하세요. 이때는 "답변할 수 없습니다"나 "그런 계획이 있는지 몰랐어요" 같은 문구를
+절대 포함시키지 마세요.
+
+공통 규칙:
+- 위 프로필에 맞게 자연스러운 존댓말로, 250자 내외로 간결하게 답하세요.
+- 참고 데이터에 있는 내용만 구체적 수치로 언급하세요.
+- {reaction_rule}"""
 
     messages = build_messages(persona_key, history, include_others=reaction)
 
@@ -627,7 +649,7 @@ if st.session_state.page == "fgi":
         st.markdown('<div class="sb-sec"><div class="sb-lbl">데이터 (7)</div>', unsafe_allow_html=True)
         kb_html = ""
         for d in DATA_INFO:
-            kb_html += f'<div class="kb-r"><div class="kb-dot"></div><div class="kb-nm">{d["name"]}</div></div>'
+            kb_html += f'<div class="kb-r"><div class="kb-dot"></div><div class="kb-nm">[{d["no"]}] {d["name"]}</div></div>'
         st.markdown(kb_html + '</div>', unsafe_allow_html=True)
 
     with mc:
@@ -822,7 +844,7 @@ else:
         st.markdown(f"""
         <div class="kb-card">
           <div class="kbc-top">
-            <div class="kbc-nm">{d['name']}</div>
+            <div class="kbc-nm">[{d['no']}] {d['name']}</div>
             <div class="kbc-b {bc}">{d['type']}</div>
           </div>
           <div class="kbc-org">{d['org']}</div>
